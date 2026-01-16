@@ -1,0 +1,22 @@
+# --- Crucial for your project ---
+data/
+weights/
+wandb/
+
+# --- Python standard ignores ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Mac OS junk ---
+.DS_Store
+
+# --- Jupyter Notebooks ---
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# --- Environment ---
+.env
+venv/
+env/
