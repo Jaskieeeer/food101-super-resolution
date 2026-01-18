@@ -1,5 +1,6 @@
 import sys
 import os
+sys.path.append(os.getcwd())
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 import torch
 import torch.nn as nn
@@ -8,24 +9,22 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 import wandb
 
-sys.path.append(os.getcwd())
 
 
 from src.dataset import FoodSRDataset
-# CHANGED: Imported SRCNN instead of ResNetSR
 from src.models import SRCNN, Discriminator 
 from src.loss import NLPDLoss
 from src.utils import calculate_metrics, save_comparison
 
-# --- CONFIGURATION (UPDATED) ---
+# --- CONFIGURATION ---
 DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
 
-# YOUR SPECIFIC SETTINGS
-LR_G = 0.001          # <--- High LR for SRCNN
-LR_D = 0.0001         # <--- Keep Discriminator slow/stable
+# Hyperparameters
+LR_G = 0.001          
+LR_D = 0.0001         
 EPOCHS = 20           
-BATCH_SIZE = 8        # <--- Small batch for generalization
-RUN_NAME = "SRGAN_SRCNN_PaperLoss_LR0.001_BS8"
+BATCH_SIZE = 16       # Increased to 16 for speed (SRCNN is small)
+RUN_NAME = "SRGAN_SRCNN_PaperLoss_BlindTrain"
 
 def train_gan():
     # 1. Initialize WandB
@@ -34,46 +33,46 @@ def train_gan():
         "generator": "SRCNN",
         "epochs": EPOCHS,
         "batch_size": BATCH_SIZE,
-        "learning_rate_G": LR_G,
-        "learning_rate_D": LR_D,
-        "split": "80/10/10"
+        "split": "90_Train_10_Val" # Documenting the blind split
     })
     
     # 2. Init Models
-    # CHANGED: Using SRCNN as the Generator
     generator = SRCNN(scale_factor=2).to(DEVICE)
     discriminator = Discriminator().to(DEVICE)
     
-    # 3. Init Optimizers
-    # 3. Init Optimizers
+    # 3. Init Optimizers & Schedulers
     optimizer_G = optim.Adam(generator.parameters(), lr=LR_G)
     optimizer_D = optim.Adam(discriminator.parameters(), lr=LR_D)
     
-    # --- NEW: SCHEDULERS ---
-    # Decays LR by 50% (gamma=0.5) every 5 epochs
+    # Decay LR by 50% every 5 epochs
     scheduler_G = torch.optim.lr_scheduler.StepLR(optimizer_G, step_size=5, gamma=0.5)
     scheduler_D = torch.optim.lr_scheduler.StepLR(optimizer_D, step_size=5, gamma=0.5)
+    
     # 4. Losses
-    criterion_GAN = nn.BCELoss() # Real vs Fake
-    criterion_content = NLPDLoss(device=DEVICE) # Texture/Pixel match
+    criterion_GAN = nn.BCELoss()
+    criterion_content = NLPDLoss(device=DEVICE)
     
-    # 5. Data Splitting (80% Train / 10% Val / 10% Test)
+    # 5. Data Splitting (Train/Val Only)
+    print("⏳ Loading Official Training Data...")
     full_ds = FoodSRDataset(split='train', crop_size=200, scale_factor=2)
-    total_len = len(full_ds)
-    train_len = int(0.8 * total_len)
-    val_len   = int(0.1 * total_len)
-    test_len  = total_len - train_len - val_len 
     
-    print(f"📊 Splitting Data: Train={train_len}, Val={val_len}, Test={test_len}")
+    # OPTIONAL: Train on a subset for speed? (Remove these 3 lines to train on full 75k)
+    # subset_indices = torch.randperm(len(full_ds))[:20000] # Train on 20k images
+    # full_ds = torch.utils.data.Subset(full_ds, subset_indices)
+    # print(f"⚡ Speed Mode: Reduced dataset to {len(full_ds)} images")
+
+    # Split 90% Train / 10% Validation
+    train_size = int(0.9 * len(full_ds))
+    val_size = len(full_ds) - train_size
     
-    train_ds, val_ds, test_ds = random_split(full_ds, [train_len, val_len, test_len])
+    print(f"📊 Blind Split: {train_size} Train | {val_size} Validation (Test Set Hidden)")
     
-    # num_workers=0 is safer on Mac M4
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
-    val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-    test_loader  = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    train_ds, val_ds = random_split(full_ds, [train_size, val_size])
     
-    print(f"🚀 Starting SRGAN (SRCNN) Training on {DEVICE}...")
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
+    val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+    
+    print(f"🚀 Starting Training on {DEVICE}...")
     
     # --- TRAINING LOOP ---
     for epoch in range(EPOCHS):
@@ -89,29 +88,21 @@ def train_gan():
             valid = torch.ones(lr_imgs.size(0), 1, device=DEVICE)
             fake = torch.zeros(lr_imgs.size(0), 1, device=DEVICE)
             
-            # -----------------
-            #  Train Generator
-            # -----------------
+            # --- Train Generator ---
             optimizer_G.zero_grad()
             gen_imgs = generator(lr_imgs)
             
             loss_adversarial = criterion_GAN(discriminator(gen_imgs), valid)
             loss_content = criterion_content(gen_imgs, hr_imgs)
-            
-            # Weighted Loss: Content (1.0) + Adversarial (0.001)
             loss_G = loss_content + (1e-3 * loss_adversarial)
             
             loss_G.backward()
             optimizer_G.step()
             
-            # ---------------------
-            #  Train Discriminator
-            # ---------------------
+            # --- Train Discriminator ---
             optimizer_D.zero_grad()
-            
             real_loss = criterion_GAN(discriminator(hr_imgs), valid)
             fake_loss = criterion_GAN(discriminator(gen_imgs.detach()), fake)
-            
             loss_D = (real_loss + fake_loss) / 2
             
             loss_D.backward()
@@ -119,12 +110,18 @@ def train_gan():
             
             loop.set_postfix(G_loss=loss_G.item(), D_loss=loss_D.item())
             
-        # --- VALIDATION LOOP ---
+        # --- VALIDATION (Mini-Check) ---
         generator.eval()
         avg_psnr = 0
         avg_ssim = 0
+        
+        # Check first 20 batches only (approx 600 images) to save time
+        check_batches = 20 
+        
         with torch.no_grad():
             for i, (lr, hr) in enumerate(val_loader):
+                if i >= check_batches: break
+                
                 lr, hr = lr.to(DEVICE), hr.to(DEVICE)
                 sr = generator(lr).clamp(0, 1)
                 
@@ -135,16 +132,15 @@ def train_gan():
                 if i == 0:
                     save_comparison(lr, sr, hr, f"GAN_SRCNN_ep{epoch+1}")
 
-        avg_psnr /= len(val_loader)
-        avg_ssim /= len(val_loader)
+        avg_psnr /= check_batches
+        avg_ssim /= check_batches
         
-        print(f"   -> Val PSNR: {avg_psnr:.2f} dB | Val SSIM: {avg_ssim:.4f}")
-        
+        # Step Schedulers
         scheduler_G.step()
         scheduler_D.step()
-        
-        current_lr_G = optimizer_G.param_groups[0]['lr']
-        print(f"   -> LR Adjusted to: {current_lr_G:.6f}")
+        current_lr = optimizer_G.param_groups[0]['lr']
+
+        print(f"   -> Val PSNR: {avg_psnr:.2f} dB | Val SSIM: {avg_ssim:.4f} | LR: {current_lr:.6f}")
         
         wandb.log({
             "epoch": epoch,
@@ -152,41 +148,15 @@ def train_gan():
             "loss_D": loss_D.item(),
             "val_psnr": avg_psnr,
             "val_ssim": avg_ssim,
-            "lr_G": current_lr_G # Log this to see the stairs in WandB
+            "lr_G": current_lr
         })
         
         # Save Checkpoint
         os.makedirs("weights", exist_ok=True)
         torch.save(generator.state_dict(), f"weights/SRGAN_SRCNN_ep{epoch+1}.pth")
 
-    # --- FINAL TEST EVALUATION ---
-    print(f"\n🧪 Evaluation on HELD-OUT TEST SET ({test_len} images)...")
-    generator.eval()
-    test_psnr = 0
-    test_ssim = 0
-    
-    with torch.no_grad():
-        for i, (lr, hr) in enumerate(test_loader):
-            lr, hr = lr.to(DEVICE), hr.to(DEVICE)
-            sr = generator(lr).clamp(0, 1)
-            
-            p, s = calculate_metrics(sr, hr)
-            test_psnr += p
-            test_ssim += s
-            
-            if i < 3:
-                save_comparison(lr, sr, hr, f"GAN_SRCNN_TEST_sample_{i}")
-
-    final_psnr = test_psnr / len(test_loader)
-    final_ssim = test_ssim / len(test_loader)
-    
-    print(f"🏆 FINAL TEST RESULTS: PSNR {final_psnr:.2f} dB | SSIM {final_ssim:.4f}")
-    
-    wandb.log({
-        "test_psnr": final_psnr,
-        "test_ssim": final_ssim
-    })
     wandb.finish()
+    print("✅ Training Complete. Run 'src/benchmark.py' to evaluate on the hidden Test Set.")
 
 if __name__ == "__main__":
     train_gan()
