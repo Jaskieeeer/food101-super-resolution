@@ -149,3 +149,49 @@ class AttentionSR(nn.Module):
         x = self.prelu(x)
         x = self.output_conv(x)
         return x
+    
+
+class Discriminator(nn.Module):
+    def __init__(self, input_shape=(3, 200, 200)):
+        super(Discriminator, self).__init__()
+
+        def discriminator_block(in_filters, out_filters, first_block=False):
+            layers = []
+            layers.append(nn.Conv2d(in_filters, out_filters, kernel_size=3, stride=1, padding=1))
+            if not first_block:
+                layers.append(nn.BatchNorm2d(out_filters))
+            layers.append(nn.LeakyReLU(0.2, inplace=True))
+            layers.append(nn.Conv2d(out_filters, out_filters, kernel_size=3, stride=2, padding=1))
+            layers.append(nn.BatchNorm2d(out_filters))
+            layers.append(nn.LeakyReLU(0.2, inplace=True))
+            return layers
+
+        layers = []
+        in_filters = input_shape[0]
+
+        # Standard VGG-style discriminator blocks
+        layers.extend(discriminator_block(in_filters, 64, first_block=True))
+        layers.extend(discriminator_block(64, 128))
+        layers.extend(discriminator_block(128, 256))
+        layers.extend(discriminator_block(256, 512))
+
+        self.model = nn.Sequential(*layers)
+
+        # Classification head
+        # We need to compute the flattened size dynamically or hardcode for 200x200 inputs
+        # If input is 200x200 -> downsampled 4 times (stride 2) -> 200 / 16 = 12.5 -> 13x13
+        # Let's use AdaptiveAvgPool to handle any size input
+        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Sequential(
+            nn.Linear(512, 1024),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(1024, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, img):
+        features = self.model(img)
+        flat = self.avg_pool(features)
+        flat = flat.view(flat.shape[0], -1)
+        validity = self.classifier(flat)
+        return validity

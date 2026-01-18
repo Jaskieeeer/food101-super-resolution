@@ -4,7 +4,37 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
 import os
 from torchvision.utils import save_image
+import lpips
 
+# Global instance to avoid reloading weights every batch
+_LPIPS_MODEL = None
+
+def get_lpips_model(device):
+    global _LPIPS_MODEL
+    if _LPIPS_MODEL is None:
+        print("🧠 Loading LPIPS Metric (AlexNet)...")
+        # 'alex' is faster and standard for evaluation
+        _LPIPS_MODEL = lpips.LPIPS(net='alex').to(device)
+        _LPIPS_MODEL.eval()
+    return _LPIPS_MODEL
+
+def calculate_lpips(img1, img2, device):
+    """
+    Inputs: Tensors [N, 3, H, W] in range [0, 1]
+    Output: Scalar (Lower is Better)
+    """
+    model = get_lpips_model(device)
+    
+    # LPIPS expects inputs in range [-1, 1]
+    # We assume img1/img2 are [0, 1]
+    img1_norm = img1 * 2 - 1
+    img2_norm = img2 * 2 - 1
+    
+    with torch.no_grad():
+        dist = model(img1_norm, img2_norm)
+    
+    # Return average distance across batch
+    return dist.mean().item()
 def calculate_metrics(img1, img2):
     """
     Calculates PSNR and SSIM for a batch of images.
