@@ -1,0 +1,13 @@
+HYPERPARAMETER ESTIMATION REPORT
+==============================
+Device: mps
+Model: SRCNN
+Steps per run: 200
+
+Results (Final Average Loss):
+LR 0.01: 0.0446
+LR 0.001: 0.0296
+LR 0.0001: 0.0429
+
+------------------------------
+RECOMMENDATION: Use Learning Rate = 0.001

@@ -1,0 +1,4 @@
+architecture error lr
+resnet mae 0.0002
+attention paper 0.0003
+ssrc paper 0.001
