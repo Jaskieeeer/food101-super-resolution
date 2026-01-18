@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 # --- MODEL 1: SRCNN (The Baseline) ---
 class SRCNN(nn.Module):
@@ -195,3 +196,74 @@ class Discriminator(nn.Module):
         flat = flat.view(flat.shape[0], -1)
         validity = self.classifier(flat)
         return validity
+    
+
+
+
+class RRDB(nn.Module):
+    """
+    Residual-in-Residual Dense Block (The heart of ESRGAN)
+    """
+    def __init__(self, nf, gc=32):
+        super(RRDB, self).__init__()
+        self.conv1 = nn.Conv2d(nf, gc, 3, 1, 1, bias=True)
+        self.conv2 = nn.Conv2d(nf + gc, gc, 3, 1, 1, bias=True)
+        self.conv3 = nn.Conv2d(nf + 2 * gc, gc, 3, 1, 1, bias=True)
+        self.conv4 = nn.Conv2d(nf + 3 * gc, gc, 3, 1, 1, bias=True)
+        self.conv5 = nn.Conv2d(nf + 4 * gc, nf, 3, 1, 1, bias=True)
+        self.lrelu = nn.LeakyReLU(0.2, inplace=True)
+
+        # Initialization (Scale down residuals for stability)
+        # This is a specific trick from the ESRGAN paper
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight)
+                m.weight.data *= 0.1 
+
+    def forward(self, x):
+        x1 = self.lrelu(self.conv1(x))
+        x2 = self.lrelu(self.conv2(torch.cat((x, x1), 1)))
+        x3 = self.lrelu(self.conv3(torch.cat((x, x1, x2), 1)))
+        x4 = self.lrelu(self.conv4(torch.cat((x, x1, x2, x3), 1)))
+        x5 = self.conv5(torch.cat((x, x1, x2, x3, x4), 1))
+        return x5 * 0.2 + x # Residual scaling
+
+class RRDBNet(nn.Module):
+    def __init__(self, in_channels=3, out_channels=3, nf=64, nb=23, scale_factor=2):
+        """
+        Args:
+            nf: Number of filters (64 is standard)
+            nb: Number of RRDB blocks (23 is standard paper, use 3-5 for speed/laptop)
+        """
+        super(RRDBNet, self).__init__()
+        
+        # 1. First Conv
+        self.conv_first = nn.Conv2d(in_channels, nf, 3, 1, 1, bias=True)
+        
+        # 2. RRDB Trunk
+        self.RRDB_trunk = nn.Sequential(*[RRDB(nf) for _ in range(nb)])
+        self.trunk_conv = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
+        
+        # 3. Upsampling
+        self.upconv1 = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
+        self.upconv2 = nn.Conv2d(nf, nf, 3, 1, 1, bias=True) # Used if scale=4
+        self.HRconv = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
+        self.conv_last = nn.Conv2d(nf, out_channels, 3, 1, 1, bias=True)
+
+        self.lrelu = nn.LeakyReLU(0.2, inplace=True)
+        self.scale_factor = scale_factor
+
+    def forward(self, x):
+        fea = self.conv_first(x)
+        trunk = self.trunk_conv(self.RRDB_trunk(fea))
+        fea = fea + trunk # Global Residual
+
+        # Upsample x2
+        fea = self.lrelu(self.upconv1(F.interpolate(fea, scale_factor=2, mode='nearest')))
+        
+        # (Optional) Upsample x4 if needed
+        if self.scale_factor == 4:
+             fea = self.lrelu(self.upconv2(F.interpolate(fea, scale_factor=2, mode='nearest')))
+
+        out = self.conv_last(self.lrelu(self.HRconv(fea)))
+        return out

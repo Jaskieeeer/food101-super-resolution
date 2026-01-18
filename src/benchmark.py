@@ -23,8 +23,8 @@ DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if 
 
 # Choose the model file you want to test
 # Try testing your GAN weights here once you have them!
-MODEL_PATH = "weights/AttentionSR_Paper_LR0.0003_BS8_epoch_10.pth" 
-SAVE_DIR = "reports/benchmark/AttentionSR_Paper_LR0.0003_BS8_epoch_10_lpips_comparison"
+MODEL_PATH = "weights/SRGAN_SRCNN_ep6.pth" 
+SAVE_DIR = "reports/benchmark/SRGAN_SRCNN_ep6_lpips_comparison"
 
 def get_model_from_filename(filename):
     if "SRCNN" in filename:
