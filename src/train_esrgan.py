@@ -25,7 +25,7 @@ DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if 
 LR_G = 0.0001           # Lower LR for fine-tuning
 LR_D = 0.0001
 EPOCHS = 20 # usually needs more, but 20 is fine for demo
-BATCH_SIZE = 256         # RRDB is heavier than SRCNN, so reduced batch size
+BATCH_SIZE = 64         # RRDB is heavier than SRCNN, so reduced batch size
 RUN_NAME = "ESRGAN_RRDB_Relativistic"
 
 # Weights: 1.0 Content, 0.005 Adversarial, 0.01 Perceptual
@@ -86,8 +86,8 @@ def train_esrgan():
     val_size = len(full_ds) - train_size
     train_ds, val_ds = random_split(full_ds, [train_size, val_size])
     
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
-    val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
+    val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
     
     print(f"🚀 Starting ESRGAN Training on {DEVICE}...")
 
