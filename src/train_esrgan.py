@@ -25,7 +25,7 @@ DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if 
 LR_G = 0.0001           # Lower LR for fine-tuning
 LR_D = 0.0001
 EPOCHS = 20 # usually needs more, but 20 is fine for demo
-BATCH_SIZE = 8         # RRDB is heavier than SRCNN, so reduced batch size
+BATCH_SIZE = 256         # RRDB is heavier than SRCNN, so reduced batch size
 RUN_NAME = "ESRGAN_RRDB_Relativistic"
 
 # Weights: 1.0 Content, 0.005 Adversarial, 0.01 Perceptual
@@ -52,7 +52,10 @@ def train_esrgan():
     # nb=3 blocks is lighter for laptop training. (Paper uses nb=23)
     generator = RRDBNet(in_channels=3, out_channels=3, nf=64, nb=3, scale_factor=2).to(DEVICE)
     discriminator = Discriminator(input_shape=(3, 200, 200)).to(DEVICE)
-    
+    if torch.cuda.device_count() > 1:
+        print(f"🔥 Using {torch.cuda.device_count()} GPUs!")
+        generator = nn.DataParallel(generator)
+        discriminator = nn.DataParallel(discriminator)
     # Load Pre-trained Weights if available (Warm Start)
     if PRETRAINED_GENERATOR_PATH and os.path.exists(PRETRAINED_GENERATOR_PATH):
         print(f"🔄 Loading pre-trained generator from {PRETRAINED_GENERATOR_PATH}...")
@@ -63,7 +66,7 @@ def train_esrgan():
     # 3. Optimizers & Schedulers
     optimizer_G = optim.Adam(generator.parameters(), lr=LR_G, betas=(0.9, 0.999))
     optimizer_D = optim.Adam(discriminator.parameters(), lr=LR_D, betas=(0.9, 0.999))
-    
+
     # Decay LR
     scheduler_G = torch.optim.lr_scheduler.StepLR(optimizer_G, step_size=5, gamma=0.5)
     scheduler_D = torch.optim.lr_scheduler.StepLR(optimizer_D, step_size=5, gamma=0.5)
