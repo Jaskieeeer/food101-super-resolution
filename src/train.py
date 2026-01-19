@@ -27,9 +27,7 @@ EPOCHS = 10  # Desired epochs per run
 
 # The 3 specific architecture/loss/LR combos you requested
 EXPERIMENT_CONFIGS = [
-    {"arch": "ResNet",      "loss_type": "MAE",   "lr": 0.0002},
-    {"arch": "AttentionSR", "loss_type": "Paper", "lr": 0.0003},
-    {"arch": "SRCNN",       "loss_type": "Paper", "lr": 0.001},
+    {"arch": "SRCNN", "loss_type": "Paper", "lr": 0.001},
 ]
 
 # Run every config with both batch sizes

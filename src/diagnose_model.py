@@ -18,12 +18,11 @@ from src.models import SRCNN, ResNetSR, AttentionSR, RRDBNet
 from src.utils import calculate_metrics, calculate_lpips
 
 # --- CONFIGURATION ---
-# Default to MPS/CUDA for big models
-GLOBAL_DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
 
 MODELS_DIR = "chosen_models"
-CSV_PATH = "reports/results_summary.csv" 
-IMG_OUTPUT_ROOT = "reports/images"
+CSV_PATH = "reports/results_summary.csv"
+IMG_OUTPUT_ROOT = "reports/images"  # <--- FIXED PATH
 
 # How many images to save for visual comparison per model?
 VISUAL_LIMIT = 20 
@@ -32,6 +31,9 @@ VISUAL_LIMIT = 20
 TEST_LIMIT = None 
 
 def get_model_from_filename(filepath):
+    """
+    Detects architecture from filename and loads weights safely.
+    """
     filename = os.path.basename(filepath)
     model_name_ext = os.path.splitext(filename)[0] 
     
@@ -46,11 +48,13 @@ def get_model_from_filename(filepath):
         model = RRDBNet(in_channels=3, out_channels=3, nf=64, nb=3, scale_factor=2)
     else:
         model = ResNetSR(scale_factor=2)
+
+    model = model.to(DEVICE)
     
     # 2. Load Weights
+    # print(f"🔄 Loading: {filename}...")
     try:
-        # Load to CPU first to be safe
-        state_dict = torch.load(filepath, map_location='cpu', weights_only=True)
+        state_dict = torch.load(filepath, map_location=DEVICE, weights_only=True)
         
         # Remove 'module.' prefix if present
         if list(state_dict.keys())[0].startswith('module.'):
@@ -73,17 +77,26 @@ def get_processed_models_from_folders(img_root, csv_path):
     its folder contains at least 20 images.
     """
     processed = set()
+    
+    # 1. Check Directories
     if os.path.exists(img_root):
         print(f"📂 Scanning output folder: {img_root}")
         for item in os.listdir(img_root):
             path = os.path.join(img_root, item)
+            
             if os.path.isdir(path):
+                # Count the PNG files inside
                 files = [f for f in os.listdir(path) if f.endswith('.png')]
-                if len(files) >= 20: 
+                count = len(files)
+                
+                # STRICT CHECK: Only skip if we have 20+ images
+                if count >= 20: 
                     processed.add(item)
+                    # print(f"   ✅ Found {item} ({count} images)")
                 else:
-                    print(f"   ⚠️ Found incomplete folder '{item}' ({len(files)}/20 images). Will re-run.")
-
+                    print(f"   ⚠️ Found incomplete folder '{item}' ({count}/20 images). Will re-run.")
+    
+    # 2. Special Check for Bicubic
     if os.path.exists(csv_path):
         try:
             with open(csv_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -92,9 +105,11 @@ def get_processed_models_from_folders(img_root, csv_path):
                     processed.add("Baseline_Bicubic")
         except:
             pass
+            
     return processed
 
 def benchmark_all():
+    # 1. Setup
     if not os.path.exists(MODELS_DIR):
         print(f"❌ Error: Directory '{MODELS_DIR}' not found.")
         return
@@ -105,9 +120,12 @@ def benchmark_all():
         return
 
     os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
+    
+    # --- CHECK FOLDERS ---
     processed_models = get_processed_models_from_folders(IMG_OUTPUT_ROOT, CSV_PATH)
     print(f"📋 Found {len(processed_models)} completed models: {list(processed_models)}")
 
+    # 2. Load Data
     print(f"⏳ Loading Test Set (Limit: {TEST_LIMIT if TEST_LIMIT else 'ALL'})...")
     full_ds = FoodSRDataset(split='test', crop_size=200, scale_factor=2)
     if TEST_LIMIT:
@@ -117,6 +135,7 @@ def benchmark_all():
     
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=4)
 
+    # Prepare CSV Header
     fieldnames = ["Model", "PSNR", "SSIM", "LPIPS"]
     if not os.path.exists(CSV_PATH):
         with open(CSV_PATH, 'w', newline='') as f:
@@ -125,74 +144,63 @@ def benchmark_all():
 
     need_bicubic = "Baseline_Bicubic" not in processed_models
     
+    # --- MODEL LOOP ---
     for f_name in model_files:
         path = os.path.join(MODELS_DIR, f_name)
+        
+        # We need the model ID (filename without extension)
+        temp_id = os.path.splitext(f_name)[0]
+        
+        if temp_id in processed_models:
+            print(f"⏭️  Skipping {temp_id} (Already Done)")
+            continue
+
+        # Load Model
+        print(f"🔄 Loading: {f_name}...")
         model, model_id = get_model_from_filename(path)
         
         if model is None: continue
         
-        # Check skipping
-        if model_id in processed_models:
-            print(f"⏭️  Skipping {model_id} (Already Done)")
-            continue
-
-        # --- DEVICE HANDLING ---
-        # SRCNN is notoriously buggy on Mac MPS. Force it to CPU.
-        # Other models can use the GPU (MPS).
-        if "SRCNN" in model_id or "srcnn" in model_id.lower():
-            run_device = torch.device("cpu")
-            print(f"⚠️ Forcing CPU for {model_id} to prevent black output bug.")
-        else:
-            run_device = GLOBAL_DEVICE
-
-        model = model.to(run_device)
         model.eval()
         
+        # Setup specific image folder
         save_img_dir = os.path.join(IMG_OUTPUT_ROOT, model_id)
         os.makedirs(save_img_dir, exist_ok=True)
         
+        # Accumulators
         m_psnr, m_ssim, m_lpips = [], [], []
         b_psnr, b_ssim, b_lpips = [], [], [] 
         
-        print(f"🚀 Benchmarking {model_id} on {run_device}...")
+        print(f"🚀 Benchmarking {model_id}...")
         
+        # --- TRY-CATCH BLOCK FOR INFERENCE ---
         try:
             with torch.no_grad():
                 for i, (lr_tensor, hr_tensor) in enumerate(tqdm(loader, leave=False)):
-                    # Move data to the same device as the model
-                    lr_dev = lr_tensor.to(run_device)
-                    hr_dev = hr_tensor.to(run_device)
+                    lr_dev = lr_tensor.to(DEVICE)
+                    hr_dev = hr_tensor.to(DEVICE)
                     
                     # A. Model Prediction
                     sr_tensor = model(lr_dev).clamp(0, 1)
-
-                    # --- DEBUG FIRST BATCH ---
-                    if i == 0:
-                        print(f"\n🔍 DEBUG {model_id}: Input Range [{lr_dev.min():.3f}, {lr_dev.max():.3f}] -> Output Range [{sr_tensor.min():.3f}, {sr_tensor.max():.3f}]")
-                        if sr_tensor.max() == 0:
-                            print("❌ STILL BLACK! Check training or model definition.")
-
                     
-                    # Move results to GLOBAL_DEVICE for metric calculation if needed, 
-                    # or keep on CPU if LPIPS is finicky. Let's compute on CPU for safety.
-                    mp, ms = calculate_metrics(sr_tensor.cpu(), hr_tensor)
-                    ml = calculate_lpips(sr_tensor.to(GLOBAL_DEVICE), hr_tensor.to(GLOBAL_DEVICE), GLOBAL_DEVICE)
+                    mp, ms = calculate_metrics(sr_tensor, hr_dev)
+                    ml = calculate_lpips(sr_tensor, hr_dev, DEVICE)
                     
                     m_psnr.append(mp)
                     m_ssim.append(ms)
                     m_lpips.append(ml)
                     
-                    # B. Bicubic Prediction
+                    # B. Bicubic Prediction (Only if needed)
                     bicubic_tensor = None
                     if need_bicubic:
-                        lr_cpu = lr_tensor # Already CPU
+                        lr_cpu = lr_dev.cpu()
                         bic_cpu = torch.nn.functional.interpolate(
-                            lr_cpu, size=hr_tensor.shape[2:], mode='bicubic', align_corners=False
+                            lr_cpu, size=hr_dev.shape[2:], mode='bicubic', align_corners=False
                         )
-                        bicubic_tensor = bic_cpu.clamp(0, 1)
+                        bicubic_tensor = bic_cpu.to(DEVICE).clamp(0, 1)
                         
-                        bp, bs = calculate_metrics(bicubic_tensor, hr_tensor)
-                        bl = calculate_lpips(bicubic_tensor.to(GLOBAL_DEVICE), hr_tensor.to(GLOBAL_DEVICE), GLOBAL_DEVICE)
+                        bp, bs = calculate_metrics(bicubic_tensor, hr_dev)
+                        bl = calculate_lpips(bicubic_tensor, hr_dev, DEVICE)
                         
                         b_psnr.append(bp)
                         b_ssim.append(bs)
@@ -201,18 +209,20 @@ def benchmark_all():
                     # C. Save Visuals
                     if i < VISUAL_LIMIT:
                         if bicubic_tensor is None:
-                             lr_cpu = lr_tensor
+                             lr_cpu = lr_dev.cpu()
                              bic_cpu = torch.nn.functional.interpolate(
-                                lr_cpu, size=hr_tensor.shape[2:], mode='bicubic', align_corners=False
+                                lr_cpu, size=hr_dev.shape[2:], mode='bicubic', align_corners=False
                             )
-                             bicubic_tensor = bic_cpu.clamp(0, 1)
+                             bicubic_tensor = bic_cpu.to(DEVICE).clamp(0, 1)
 
                         save_comparison(
-                            lr_tensor, bicubic_tensor, sr_tensor.cpu(), hr_tensor, 
+                            lr_tensor, bicubic_tensor, sr_tensor, hr_tensor, 
                             f"{save_img_dir}/img_{i:03d}.png", model_id
                         )
 
             # --- SAVE RESULTS ---
+            
+            # 1. Save Bicubic
             if need_bicubic and len(b_psnr) > 0:
                 avg_bp = sum(b_psnr) / len(b_psnr)
                 avg_bs = sum(b_ssim) / len(b_ssim)
@@ -230,6 +240,7 @@ def benchmark_all():
                 processed_models.add("Baseline_Bicubic")
                 need_bicubic = False 
 
+            # 2. Save Model Results
             avg_mp = sum(m_psnr) / len(m_psnr)
             avg_ms = sum(m_ssim) / len(m_ssim)
             avg_ml = sum(m_lpips) / len(m_lpips)

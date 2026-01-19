@@ -4,33 +4,40 @@ import torch.nn.functional as F
 
 # --- MODEL 1: SRCNN (The Baseline) ---
 class SRCNN(nn.Module):
-    def __init__(self, scale_factor=2):
+    def __init__(self, num_channels=3, scale_factor=2):
         super(SRCNN, self).__init__()
         
-        # FIXED: Add internal upsampling to match Target size
-        self.upsample = nn.Upsample(scale_factor=scale_factor, mode='bicubic', align_corners=False)
+        # 1. Store the scale factor (Crucial for the forward pass)
+        self.scale_factor = scale_factor 
         
-        # Layer 1: Feature Extraction
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=9, padding=4)
-        self.relu1 = nn.ReLU(inplace=True)
-        
-        # Layer 2: Non-linear Mapping
+        # 2. Define Layers
+        # We use padding to keep dimensions the same after convolution
+        self.conv1 = nn.Conv2d(num_channels, 64, kernel_size=9, padding=4)
         self.conv2 = nn.Conv2d(64, 32, kernel_size=1, padding=0)
-        self.relu2 = nn.ReLU(inplace=True)
+        self.conv3 = nn.Conv2d(32, num_channels, kernel_size=5, padding=2)
         
-        # Layer 3: Reconstruction
-        self.conv3 = nn.Conv2d(32, 3, kernel_size=5, padding=2)
-        
-    def forward(self, x):
-        # 1. Upscale first (100x100 -> 200x200)
-        x = self.upsample(x)
-        
-        # 2. Refine with CNN
-        x = self.relu1(self.conv1(x))
-        x = self.relu2(self.conv2(x))
-        x = self.conv3(x)
-        return x
+        self.relu = nn.ReLU(inplace=True)
 
+    def forward(self, x):
+        # 1. Bicubic Upsampling (The "Pre-Upsampling" step of SRCNN)
+        # MPS FIX: Temporarily move to CPU to prevent Mac crashes on bicubic
+        if x.device.type == 'mps':
+            x = x.cpu()
+            x = torch.nn.functional.interpolate(
+                x, scale_factor=self.scale_factor, mode='bicubic', align_corners=False
+            )
+            x = x.to('mps')
+        else:
+            x = torch.nn.functional.interpolate(
+                x, scale_factor=self.scale_factor, mode='bicubic', align_corners=False
+            )
+
+        # 2. SRCNN Refining Layers
+        x = self.relu(self.conv1(x))
+        x = self.relu(self.conv2(x))
+        x = self.conv3(x)
+        
+        return x
 # --- MODEL 2: ResNetSR (The Advanced Model) ---
 class ResidualBlock(nn.Module):
     def __init__(self, channels):

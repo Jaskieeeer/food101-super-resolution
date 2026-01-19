@@ -1,0 +1,3 @@
+Model,PSNR,SSIM,LPIPS
+Baseline_Bicubic,34.14,0.9359,0.1598
+AttentionSR_Paper_LR0.0003_BS16_epoch_9,36.60,0.9591,0.0741
