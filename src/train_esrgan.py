@@ -17,7 +17,8 @@ from src.dataset import FoodSRDataset
 from src.models import RRDBNet, Discriminator 
 from src.loss import NLPDLoss
 from src.utils import calculate_metrics, save_comparison
-
+from torch.cuda.amp import autocast, GradScaler
+scaler = GradScaler()
 # --- CONFIGURATION ---
 DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
 
@@ -89,22 +90,34 @@ def train_esrgan():
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
     
+    # ... (Previous code remains the same) ...
+    
     print(f"🚀 Starting ESRGAN Training on {DEVICE}...")
 
     for epoch in range(EPOCHS):
+        
+        # --- PHASE 1: WARMUP (Generator L1 Only) ---
         if epoch < 5:
             print(f"🔥 Warmup Phase (Epoch {epoch+1}): Generator L1 Only")
+            generator.train() 
             
-            for lr, hr in train_loader:
+            for lr, hr in tqdm(train_loader, desc=f"Warmup {epoch+1}"):
                 lr, hr = lr.to(DEVICE), hr.to(DEVICE)
                 
                 optimizer_G.zero_grad()
-                sr = generator(lr)
-                loss_pixel = criterion_content(sr, hr) # L1 Loss
-                loss_pixel.backward()
-                optimizer_G.step()
                 
-            continue
+                # AMP ENABLED FOR WARMUP
+                with autocast():
+                    sr = generator(lr)
+                    loss_pixel = criterion_content(sr, hr)
+                
+                scaler.scale(loss_pixel).backward()
+                scaler.step(optimizer_G)
+                scaler.update()
+                
+            continue # Skip the rest of the loop (GAN training)
+
+        # --- PHASE 2: GAN TRAINING ---
         generator.train()
         discriminator.train()
         
@@ -119,56 +132,54 @@ def train_esrgan():
             # -----------------------------------------
             optimizer_D.zero_grad()
             
-            # Generate Fake Images
-            gen_imgs = generator(lr_imgs)
+            with autocast():
+                # Generate Fake Images
+                gen_imgs = generator(lr_imgs)
+                
+                # Get Raw Logits
+                real_logits = discriminator(hr_imgs)
+                fake_logits = discriminator(gen_imgs.detach()) 
+                
+                # RaGAN Logic
+                d_loss_real = criterion_GAN(real_logits - torch.mean(fake_logits), torch.ones_like(real_logits))
+                d_loss_fake = criterion_GAN(fake_logits - torch.mean(real_logits), torch.zeros_like(fake_logits))
+                
+                loss_D = (d_loss_real + d_loss_fake) / 2
             
-            # Get Raw Logits (No Sigmoid yet)
-            real_logits = discriminator(hr_imgs)
-            fake_logits = discriminator(gen_imgs.detach()) # Detach so G doesn't get grads
-            
-            # RaGAN Logic for Discriminator:
-            # D tries to make Real > Fake
-            # Loss 1: Real - mean(Fake) -> Label 1 (Real looks realer than fake average)
-            d_loss_real = criterion_GAN(real_logits - torch.mean(fake_logits), torch.ones_like(real_logits))
-            # Loss 2: Fake - mean(Real) -> Label 0 (Fake looks faker than real average)
-            d_loss_fake = criterion_GAN(fake_logits - torch.mean(real_logits), torch.zeros_like(fake_logits))
-            
-            loss_D = (d_loss_real + d_loss_fake) / 2
-            
-            loss_D.backward()
-            optimizer_D.step()
+            # SCALED BACKWARD PASS
+            scaler.scale(loss_D).backward()
+            scaler.step(optimizer_D)
+            scaler.update()
             
             # -----------------------------------------
             #  2. Train Generator (Relativistic)
             # -----------------------------------------
             optimizer_G.zero_grad()
             
-            # Re-calculate logits (Fake now keeps gradients for G)
-            # We treat real_logits as constant here (detach)
-            real_logits = real_logits.detach() 
-            fake_logits = discriminator(gen_imgs) 
+            with autocast():
+                # Re-calculate logits (Fake now keeps gradients for G)
+                # Note: We detach real_logits to save memory/computation
+                real_logits = real_logits.detach() 
+                fake_logits = discriminator(gen_imgs) 
+                
+                # RaGAN Logic for Generator
+                g_loss_real = criterion_GAN(real_logits - torch.mean(fake_logits), torch.zeros_like(real_logits))
+                g_loss_fake = criterion_GAN(fake_logits - torch.mean(real_logits), torch.ones_like(fake_logits))
+                
+                loss_adversarial = (g_loss_real + g_loss_fake) / 2
+                
+                # Other Losses
+                loss_pixel = criterion_content(gen_imgs, hr_imgs)
+                loss_texture = criterion_percep(gen_imgs, hr_imgs)
+                
+                loss_G = (LAMBDA_CONTENT * loss_pixel) + \
+                         (LAMBDA_PERCEP * loss_texture) + \
+                         (LAMBDA_ADV * loss_adversarial)
             
-            # RaGAN Logic for Generator:
-            # G tries to fool D. 
-            # Loss 1: Real - mean(Fake) -> Label 0 (Real looks Fake compared to Fake??)
-            # Ideally: Make Real look less real than Fake.
-            g_loss_real = criterion_GAN(real_logits - torch.mean(fake_logits), torch.zeros_like(real_logits))
-            # Loss 2: Fake - mean(Real) -> Label 1 (Fake looks Realer than Real avg)
-            g_loss_fake = criterion_GAN(fake_logits - torch.mean(real_logits), torch.ones_like(fake_logits))
-            
-            loss_adversarial = (g_loss_real + g_loss_fake) / 2
-            
-            # Other Losses
-            loss_pixel = criterion_content(gen_imgs, hr_imgs)
-            loss_texture = criterion_percep(gen_imgs, hr_imgs)
-            
-            # Total G Loss
-            loss_G = (LAMBDA_CONTENT * loss_pixel) + \
-                     (LAMBDA_PERCEP * loss_texture) + \
-                     (LAMBDA_ADV * loss_adversarial)
-            
-            loss_G.backward()
-            optimizer_G.step()
+            # SCALED BACKWARD PASS
+            scaler.scale(loss_G).backward()
+            scaler.step(optimizer_G)
+            scaler.update()
             
             # Logging
             loop.set_postfix(G_loss=loss_G.item(), D_loss=loss_D.item())
