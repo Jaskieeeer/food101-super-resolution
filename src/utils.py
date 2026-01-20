@@ -1,5 +1,6 @@
 import torch
 import os
+import wandb
 
 def get_gradient_norm(model):
     total_norm = 0.0
@@ -23,3 +24,4 @@ def save_checkpoint(model, epoch, path):
         torch.save(model.module.state_dict(), path)
     else:
         torch.save(model.state_dict(), path)
+    wandb.save(path)
