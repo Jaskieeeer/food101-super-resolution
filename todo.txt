@@ -1,0 +1,25 @@
+models for architecture tuning:
+-attentionSR
+-ESRGAN
+-SRGAN
+-SRCNN
+-RESNET
+Hyperparameters to tune:
+-batch size
+-lr
+-epochs
+-loss
+performance metrics:
+-ssim
+-nlpd
+-psnr
+-lpips
+-vgg19
+training dynamics metrics:
+-Global Gradient Norm
+-Discriminator Logits / Probabilities (D(x) vs D(G(z)))
+-Layer-wise Gradient Ratios 1st vs last layer
+other requirements:
+-wandb use (sweeps/runs/reports)
+-Testing various loss functions (at least 3) +1pk
+-adaptive lr
