@@ -21,9 +21,11 @@ class NLPDLoss(nn.Module):
         self.n_levels = n_levels
         self.mae = nn.L1Loss()
         
-        # 5x5 Gaussian Kernel
+        # 1. Create the kernel
         kernel = self._get_gaussian_kernel()
-        # Register as buffer to save with model state
+        
+        # 2. CRITICAL FIX: Register as buffer
+        # This creates 'self.kernel' and ensures it moves to GPU automatically
         self.register_buffer("kernel", kernel) 
         
     def _get_gaussian_kernel(self, size=5, sigma=1.0, channels=3):
@@ -45,6 +47,7 @@ class NLPDLoss(nn.Module):
         pyramid = []
         current = img
         for _ in range(self.n_levels):
+            # self.kernel is now automatically on the correct device
             blurred = F.conv2d(current, self.kernel, padding=2, groups=3)
             down = blurred[:, :, ::2, ::2]
             up = F.interpolate(down, size=current.shape[2:], mode='bilinear', align_corners=False)
