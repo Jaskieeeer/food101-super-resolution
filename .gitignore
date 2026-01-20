@@ -1,0 +1,40 @@
+# --- Project Specific Data & Outputs ---
+# Datasets (Extracted folders and archives)
+food-101/
+data/
+*.tar.gz
+*.zip
+
+# Model Checkpoints (Heavy files)
+weights/
+*.pth
+*.pt
+*.ckpt
+
+# Generated Results (Images from training)
+results/
+outputs/
+
+# WandB (Local run data)
+wandb/
+
+# --- Python & Environment Standard ---
+# Byte-compiled / Optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+env/
+.env
+.venv
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# IDE Settings
+.vscode/
+.idea/
+*.swp
+.DS_Store

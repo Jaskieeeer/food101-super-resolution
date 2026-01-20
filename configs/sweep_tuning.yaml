@@ -1,0 +1,17 @@
+program: train.py
+method: bayes  # Uses Bayesian optimization to find best params faster
+metric:
+  name: val_psnr
+  goal: maximize
+parameters:
+  architecture:
+    values: ["SRCNN", "RESNET", "AttentionSR", "ESRGAN"]
+  loss_function:
+    values: ["mae","mse","perceptual","nlpd"] 
+  lr:
+    min: 0.0001
+    max: 0.001
+  batch_size:
+    values: [8, 16, 32]
+  epochs:
+    value: 10
