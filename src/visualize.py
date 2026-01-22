@@ -1,150 +1,103 @@
 import torch
-from torchvision import transforms
-from PIL import Image
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
-import os
-import math
 import numpy as np
+import random
 
 # 1. Import your model
 from src.models import AttentionSR
 
 # --- CONFIGURATION ---
-WEIGHTS_PATH = "weights/AttentionSR_Phase1.pth" 
+WEIGHTS_PATH = "weights/AttentionSR_Phase1.pth"
 SCALE_FACTOR = 4
-PATH_FILE = "test.txt" # <--- The file you uploaded
-
-# Default images (if test.txt is empty or missing)
-TEST_IMAGES = [
-    "data/food-101/images/pizza/12345.jpg",
-]
+NUM_EXAMPLES = 3  # How many test images to show
 # ---------------------
 
-def load_paths_from_file(filename):
-    """Reads image paths from a text file, one per line."""
-    paths = []
-    if not os.path.exists(filename):
-        print(f"⚠️ Warning: '{filename}' not found. Using default list.")
-        return []
-    
-    with open(filename, 'r') as f:
-        lines = f.readlines()
-    
-    # Clean up lines (remove newlines, extra spaces)
-    for line in lines:
-        clean_path = line.strip()
-        if clean_path and not clean_path.startswith("#"): # Skip empty lines or comments
-            paths.append(clean_path)
-            
-    print(f"📂 Loaded {len(paths)} extra paths from {filename}")
-    return paths
-
-def calculate_psnr(img1, img2):
-    img1 = np.array(img1).astype(np.float32)
-    img2 = np.array(img2).astype(np.float32)
-    mse = np.mean((img1 - img2) ** 2)
-    if mse == 0:
-        return 100
-    max_pixel = 255.0
-    psnr = 20 * math.log10(max_pixel / math.sqrt(mse))
-    return psnr
-
-def run_benchmark():
+def run_clean_test():
     device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🚀 Running Benchmark on {device}...")
+    print(f"🚀 Loading Official Test Set on {device}...")
 
-    # Load Model
+    # 1. Load the Official Test Split (Guaranteed Unseen Data)
+    # We don't resize here; we want the original big image to crop from
+    test_dataset = datasets.Food101(
+        root='./data', 
+        split='test',  # <--- CRITICAL: This ensures 0% pollution
+        download=True,
+        transform=transforms.ToTensor()
+    )
+    
+    # 2. Load Your Model
     model = AttentionSR(scale_factor=SCALE_FACTOR).to(device)
     try:
         model.load_state_dict(torch.load(WEIGHTS_PATH, map_location=device))
-        print("✅ Weights loaded.")
+        print(f"✅ Loaded weights: {WEIGHTS_PATH}")
     except FileNotFoundError:
-        print("❌ Weights not found! Check path.")
+        print(f"❌ Error: Weights file not found at {WEIGHTS_PATH}")
         return
+
     model.eval()
 
-    # --- MERGE PATHS ---
-    # Combine hardcoded defaults with paths from test.txt
-    file_paths = load_paths_from_file(PATH_FILE)
-    all_images = TEST_IMAGES + file_paths
+    # 3. Pick Random Indices from the Test Set
+    total_test_images = len(test_dataset)
+    print(f"📚 Total Test Images Available: {total_test_images}")
     
-    # Remove duplicates just in case
-    all_images = list(set(all_images))
+    indices = random.sample(range(total_test_images), NUM_EXAMPLES)
 
-    if not all_images:
-        print("❌ No images found to test! Check test.txt or default paths.")
-        return
-
-    for img_path in all_images:
-        if not os.path.exists(img_path):
-            print(f"⚠️ Skipping missing file: {img_path}")
-            continue
-
-        print(f"Processing: {os.path.basename(img_path)}...")
+    for i, idx in enumerate(indices):
+        hr_img, _ = test_dataset[idx] # Get High Res Tensor
         
-        # 1. Prepare Data
-        try:
-            hr_img = Image.open(img_path).convert('RGB')
-        except Exception as e:
-            print(f"❌ Error opening {img_path}: {e}")
-            continue
-            
-        w, h = hr_img.size
+        # 4. Prepare Input (Create Low Res on the fly)
+        # We process dimensions to ensure they are clean multiples of 4
+        c, h, w = hr_img.shape
+        h, w = (h // SCALE_FACTOR) * SCALE_FACTOR, (w // SCALE_FACTOR) * SCALE_FACTOR
+        hr_img = hr_img[:, :h, :w] # Crop slightly to fit scale
         
-        # Ensure divisible by scale factor
-        w, h = (w // SCALE_FACTOR) * SCALE_FACTOR, (h // SCALE_FACTOR) * SCALE_FACTOR
-        hr_img = hr_img.resize((w, h), Image.BICUBIC)
-
-        # Create Low Res Input
-        lr_dims = (w // SCALE_FACTOR, h // SCALE_FACTOR)
-        lr_img = hr_img.resize(lr_dims, Image.BICUBIC)
-
-        # 2. CLASSIC CV METHOD (Bicubic)
-        classic_cv_img = lr_img.resize((w, h), Image.BICUBIC)
+        # Downscale to create input (Bicubic simulation)
+        resize_down = transforms.Resize((h // SCALE_FACTOR, w // SCALE_FACTOR), interpolation=transforms.InterpolationMode.BICUBIC)
+        lr_img = resize_down(hr_img)
         
-        # 3. AI METHOD (AttentionSR)
-        img_tensor = transforms.ToTensor()(lr_img).unsqueeze(0).to(device)
+        # Send to Model
+        lr_tensor = lr_img.unsqueeze(0).to(device)
+        
         with torch.no_grad():
-            output = model(img_tensor)
-        
-        output = torch.clamp(output, 0.0, 1.0).squeeze(0).cpu()
-        ai_img = transforms.ToPILImage()(output)
-
-        # 4. Calculate Scores
-        psnr_classic = calculate_psnr(classic_cv_img, hr_img)
-        psnr_ai = calculate_psnr(ai_img, hr_img)
+            sr_tensor = model(lr_tensor)
 
         # 5. Visualize
-        crop = 100
-        cx, cy = w // 2, h // 2
-        box = (cx - crop, cy - crop, cx + crop, cy + crop)
+        plot_comparison(lr_tensor, sr_tensor, hr_img, idx)
 
-        fig, axes = plt.subplots(1, 4, figsize=(20, 6))
+def plot_comparison(lr, sr, hr, img_id):
+    # Convert tensors to displayable images
+    lr_img = transforms.ToPILImage()(torch.clamp(lr.squeeze(0).cpu(), 0, 1))
+    sr_img = transforms.ToPILImage()(torch.clamp(sr.squeeze(0).cpu(), 0, 1))
+    hr_img = transforms.ToPILImage()(torch.clamp(hr.cpu(), 0, 1))
+    
+    # Create a nice crop to see details (Center 100x100)
+    w, h = hr_img.size
+    crop_size = 120
+    cx, cy = w // 2, h // 2
+    box = (cx - crop_size, cy - crop_size, cx + crop_size, cy + crop_size)
+    
+    fig, axes = plt.subplots(1, 3, figsize=(15, 6))
+    
+    # Left: Input (Upscaled purely for display)
+    axes[0].imshow(lr_img.resize(hr_img.size, resample=0).crop(box))
+    axes[0].set_title(f"Input (Simulated {hr_img.size[0]//4}px)")
+    axes[0].axis('off')
 
-        # A: Input
-        axes[0].imshow(lr_img.resize((w, h), Image.NEAREST).crop(box))
-        axes[0].set_title("Input (Pixels)", fontsize=12)
-        
-        # B: Classic
-        axes[1].imshow(classic_cv_img.crop(box))
-        axes[1].set_title(f"Classic CV\nPSNR: {psnr_classic:.2f} dB", fontsize=12, color='red')
+    # Middle: Your Model
+    axes[1].imshow(sr_img.crop(box))
+    axes[1].set_title("AttentionSR Output", color='green', fontweight='bold')
+    axes[1].axis('off')
 
-        # C: AI
-        axes[2].imshow(ai_img.crop(box))
-        color = 'green' if psnr_ai > psnr_classic else 'black'
-        axes[2].set_title(f"AttentionSR\nPSNR: {psnr_ai:.2f} dB", fontsize=12, color=color, fontweight='bold')
+    # Right: Ground Truth
+    axes[2].imshow(hr_img.crop(box))
+    axes[2].set_title("Ground Truth (Real)")
+    axes[2].axis('off')
 
-        # D: Truth
-        axes[3].imshow(hr_img.crop(box))
-        axes[3].set_title("Ground Truth", fontsize=12)
-
-        for ax in axes:
-            ax.set_xticks([])
-            ax.set_yticks([])
-
-        plt.suptitle(f"Benchmark: {os.path.basename(img_path)} (x{SCALE_FACTOR})", fontsize=16)
-        plt.tight_layout()
-        plt.show()
+    plt.suptitle(f"Test Image ID: {img_id} (Unseen Data)", fontsize=14)
+    plt.tight_layout()
+    plt.show()
 
 if __name__ == "__main__":
-    run_benchmark()
+    run_clean_test()
