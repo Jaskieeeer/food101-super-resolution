@@ -12,16 +12,34 @@ from src.models import AttentionSR
 # --- CONFIGURATION ---
 WEIGHTS_PATH = "weights/AttentionSR_Phase1.pth" 
 SCALE_FACTOR = 4
+PATH_FILE = "test.txt" # <--- The file you uploaded
 
-# Add your own image paths here
+# Default images (if test.txt is empty or missing)
 TEST_IMAGES = [
     "data/food-101/images/pizza/12345.jpg",
-    "data/food-101/images/hamburger/56789.jpg"
 ]
 # ---------------------
 
+def load_paths_from_file(filename):
+    """Reads image paths from a text file, one per line."""
+    paths = []
+    if not os.path.exists(filename):
+        print(f"⚠️ Warning: '{filename}' not found. Using default list.")
+        return []
+    
+    with open(filename, 'r') as f:
+        lines = f.readlines()
+    
+    # Clean up lines (remove newlines, extra spaces)
+    for line in lines:
+        clean_path = line.strip()
+        if clean_path and not clean_path.startswith("#"): # Skip empty lines or comments
+            paths.append(clean_path)
+            
+    print(f"📂 Loaded {len(paths)} extra paths from {filename}")
+    return paths
+
 def calculate_psnr(img1, img2):
-    # Convert images to numpy and float32
     img1 = np.array(img1).astype(np.float32)
     img2 = np.array(img2).astype(np.float32)
     mse = np.mean((img1 - img2) ** 2)
@@ -32,7 +50,6 @@ def calculate_psnr(img1, img2):
     return psnr
 
 def run_benchmark():
-    # Setup Device
     device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
     print(f"🚀 Running Benchmark on {device}...")
 
@@ -46,17 +63,35 @@ def run_benchmark():
         return
     model.eval()
 
-    for img_path in TEST_IMAGES:
+    # --- MERGE PATHS ---
+    # Combine hardcoded defaults with paths from test.txt
+    file_paths = load_paths_from_file(PATH_FILE)
+    all_images = TEST_IMAGES + file_paths
+    
+    # Remove duplicates just in case
+    all_images = list(set(all_images))
+
+    if not all_images:
+        print("❌ No images found to test! Check test.txt or default paths.")
+        return
+
+    for img_path in all_images:
         if not os.path.exists(img_path):
+            print(f"⚠️ Skipping missing file: {img_path}")
             continue
 
         print(f"Processing: {os.path.basename(img_path)}...")
         
         # 1. Prepare Data
-        hr_img = Image.open(img_path).convert('RGB')
+        try:
+            hr_img = Image.open(img_path).convert('RGB')
+        except Exception as e:
+            print(f"❌ Error opening {img_path}: {e}")
+            continue
+            
         w, h = hr_img.size
         
-        # Make sure dimensions are divisible by scale factor (for clean comparison)
+        # Ensure divisible by scale factor
         w, h = (w // SCALE_FACTOR) * SCALE_FACTOR, (h // SCALE_FACTOR) * SCALE_FACTOR
         hr_img = hr_img.resize((w, h), Image.BICUBIC)
 
@@ -64,11 +99,10 @@ def run_benchmark():
         lr_dims = (w // SCALE_FACTOR, h // SCALE_FACTOR)
         lr_img = hr_img.resize(lr_dims, Image.BICUBIC)
 
-        # 2. CLASSIC CV METHOD (Bicubic Upscale)
-        # This is what Photoshop does. It smoothes pixels but adds no detail.
+        # 2. CLASSIC CV METHOD (Bicubic)
         classic_cv_img = lr_img.resize((w, h), Image.BICUBIC)
         
-        # 3. AI METHOD (Your Model)
+        # 3. AI METHOD (AttentionSR)
         img_tensor = transforms.ToTensor()(lr_img).unsqueeze(0).to(device)
         with torch.no_grad():
             output = model(img_tensor)
@@ -80,37 +114,30 @@ def run_benchmark():
         psnr_classic = calculate_psnr(classic_cv_img, hr_img)
         psnr_ai = calculate_psnr(ai_img, hr_img)
 
-        # 5. Visualize (Zoomed Crop)
-        # We crop the center to see details better
+        # 5. Visualize
         crop = 100
         cx, cy = w // 2, h // 2
         box = (cx - crop, cy - crop, cx + crop, cy + crop)
 
         fig, axes = plt.subplots(1, 4, figsize=(20, 6))
 
-        # A: Low Res (Pixelated view)
+        # A: Input
         axes[0].imshow(lr_img.resize((w, h), Image.NEAREST).crop(box))
         axes[0].set_title("Input (Pixels)", fontsize=12)
-        axes[0].set_xlabel("What the model sees")
         
-        # B: Classic CV (Bicubic)
+        # B: Classic
         axes[1].imshow(classic_cv_img.crop(box))
-        axes[1].set_title(f"Classic CV (Bicubic)\nPSNR: {psnr_classic:.2f} dB", fontsize=12, color='red')
-        axes[1].set_xlabel("Smooth but Blurry")
+        axes[1].set_title(f"Classic CV\nPSNR: {psnr_classic:.2f} dB", fontsize=12, color='red')
 
-        # C: Your AI Model
+        # C: AI
         axes[2].imshow(ai_img.crop(box))
-        # Green title if you beat classic (you should!)
         color = 'green' if psnr_ai > psnr_classic else 'black'
-        axes[2].set_title(f"AttentionSR (Ours)\nPSNR: {psnr_ai:.2f} dB", fontsize=12, color=color, fontweight='bold')
-        axes[2].set_xlabel("Sharper Edges & Details")
+        axes[2].set_title(f"AttentionSR\nPSNR: {psnr_ai:.2f} dB", fontsize=12, color=color, fontweight='bold')
 
-        # D: Ground Truth
+        # D: Truth
         axes[3].imshow(hr_img.crop(box))
         axes[3].set_title("Ground Truth", fontsize=12)
-        axes[3].set_xlabel("Perfect Image")
 
-        # Hide ticks
         for ax in axes:
             ax.set_xticks([])
             ax.set_yticks([])
