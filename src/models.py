@@ -132,12 +132,22 @@ class Discriminator(nn.Module):
     def forward(self, x):
         return self.classifier(self.net(x))
 
+class AttentionSR(ResNetSR):
+    """
+    Wrapper class so we can just import 'AttentionSR' directly.
+    It forces use_attention=True automatically.
+    """
+    def __init__(self, scale_factor=4, **kwargs):
+        super(AttentionSR, self).__init__(scale_factor=scale_factor, use_attention=True, **kwargs)
+
+# Update get_model to use the new class
 def get_model(name, scale_factor=4, device='cpu'):
     if name == "SRCNN":
         return SRCNN(scale_factor=scale_factor).to(device)
     elif name == "RESNET":
         return ResNetSR(scale_factor=scale_factor).to(device)
     elif name == "AttentionSR":
-        return ResNetSR(scale_factor=scale_factor, use_attention=True).to(device)
+        # NOW THIS WORKS PERFECTLY:
+        return AttentionSR(scale_factor=scale_factor).to(device)
     else:
         raise ValueError(f"Unknown architecture: {name}")
