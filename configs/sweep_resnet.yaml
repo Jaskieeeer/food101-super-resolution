@@ -1,0 +1,19 @@
+program: train.py
+method: bayes
+metric:
+  name: val_psnr
+  goal: maximize
+parameters:
+  architecture:
+    value: "RESNET" # Fixed
+  loss_function:
+    values: ["mae","mse","nlpd"] # Test if NLPD helps structure
+  lr:
+    min: 0.0001
+    max: 0.0005     
+  batch_size:
+    values: [8,16, 32]
+  subset:
+    value: 0.025
+  epochs:
+    value: 10

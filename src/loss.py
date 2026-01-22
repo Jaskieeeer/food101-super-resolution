@@ -77,6 +77,6 @@ def get_loss_function(name, device):
     elif name == "perceptual":
         return PerceptualLoss(device)
     elif name == "nlpd":
-        return NLPDLoss(device=device) 
+        return NLPDLoss(device=device).to(device)
     else:
         raise ValueError(f"❌ Unknown loss function: {name}")

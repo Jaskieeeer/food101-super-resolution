@@ -1,0 +1,19 @@
+program: train.py
+method: bayes
+metric:
+  name: val_psnr
+  goal: maximize
+parameters:
+  architecture:
+    value: "AttentionSR" 
+  loss_function:
+    values: ["mae","mse", "nlpd"]
+  lr:
+    min: 0.00005    
+    max: 0.0004
+  batch_size:
+    values: [8, 16, 32]
+  subset:
+    value: 0.025
+  epochs:
+    value: 10

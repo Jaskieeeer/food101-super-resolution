@@ -5,15 +5,15 @@ metric:
   goal: maximize
 parameters:
   architecture:
-    values: ["SRCNN", "RESNET", "AttentionSR"] 
+    value: "SRCNN"  
   loss_function:
-    values: ["mae", "nlpd","mse"] 
+    values: ["mae", "mse","nlpd"] 
   lr:
     min: 0.0001
-    max: 0.001
+    max: 0.001     
   batch_size:
-    values: [8,16, 32] 
+    values: [16, 32, 64]
+  subset:
+    value: 0.025      
   epochs:
     value: 10
-  subset:
-    value: 0.1

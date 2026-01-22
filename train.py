@@ -1,3 +1,5 @@
+import os
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 import argparse
 import torch
 import torch.optim as optim
@@ -12,7 +14,7 @@ from src.dataset import FoodSRDataset
 from src.models import get_model, Discriminator
 from src.loss import get_loss_function
 from src.metrics import MetricsCalculator
-from src.utils import get_gradient_norm, get_layer_grad_ratio, save_checkpoint
+from src.utils import get_gradient_norm, get_layer_grad_ratio, save_checkpoint, get_weight_norm
 
 def train(config=None):
     with wandb.init(config=config) as run:
@@ -23,7 +25,7 @@ def train(config=None):
         print(f"🚀 Running on {device} | Arch: {cfg.architecture} | Loss: {cfg.loss_function}")
 
         # --- DATASET (With Proxy/Subset Logic) ---
-        full_ds = FoodSRDataset(split='train', crop_size=cfg.crop_size, scale_factor=4)
+        full_ds = FoodSRDataset(split='train', crop_size=200, scale_factor=4)
         
         if cfg.subset < 1.0:
             subset_len = int(len(full_ds) * cfg.subset)
@@ -64,7 +66,8 @@ def train(config=None):
             criterion = get_loss_function(cfg.loss_function, device)
 
         metrics_calc = MetricsCalculator(device)
-
+        best_psnr = 0.0
+        patience_counter = 0
         # --- TRAINING LOOP ---
         for epoch in range(cfg.epochs):
             model.train()
@@ -108,13 +111,26 @@ def train(config=None):
                     loss = (1e-2 * loss_pixel) + (1.0 * loss_perc) + (5e-3 * loss_adv)
                     
                     loss.backward()
+                    if not torch.isfinite(loss):
+                        print(f"💥 GENERATOR EXPLODED: {loss.item()}. Stopping run.")
+                        wandb.log({"status": "exploded"})
+                        run.finish()
+                        return
+
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.max_norm)
                     grad_norm = get_gradient_norm(model)
+                    weight_norm = get_weight_norm(model)  
+                    layer_ratio = get_layer_grad_ratio(model)
                     optimizer.step()
                     
                     wandb.log({
-                        "train_loss_G": loss.item(), "train_loss_D": loss_D.item(),
+                        "train_loss_G": loss.item(), 
+                        "train_loss_D": loss_D.item(),
                         "dynamics/D_real": torch.sigmoid(real_logits).mean().item(),
-                        "dynamics/D_fake": torch.sigmoid(fake_logits).mean().item()
+                        "dynamics/D_fake": torch.sigmoid(fake_logits).mean().item(),
+                        "dynamics/grad_norm": grad_norm,
+                        "dynamics/weight_norm": weight_norm,
+                        "dynamics/layer_ratio": layer_ratio
                     })
 
                 # --- B. STANDARD TRAINING PATH ---
@@ -122,19 +138,25 @@ def train(config=None):
                     optimizer.zero_grad()
                     sr_imgs = model(lr_imgs)
                     loss = criterion(sr_imgs, hr_imgs)
-                    
+                    if not torch.isfinite(loss):
+                        print(f"💥 LOSS EXPLOSION DETECTED: {loss.item()}. Stopping run to save time.")
+                        wandb.log({"status": "exploded"})
+                        run.finish() # Cleanly end the wandb run
+                        return # Exit the function
                     loss.backward()
-                    
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.max_norm)
                     # Dynamics
                     grad_norm = get_gradient_norm(model)
                     layer_ratio = get_layer_grad_ratio(model)
+                    weight_norm = get_weight_norm(model)
                     
                     optimizer.step()
                     
                     wandb.log({
                         "train_loss": loss.item(),
                         "dynamics/grad_norm": grad_norm,
-                        "dynamics/layer_ratio": layer_ratio
+                        "dynamics/layer_ratio": layer_ratio,
+                        "dynamics/weight_norm": weight_norm 
                     })
 
             # --- VALIDATION ---
@@ -168,8 +190,22 @@ def train(config=None):
             })
             
             # Save
-            if epoch % 5 == 0 or epoch == cfg.epochs - 1:
-                save_checkpoint(model, epoch, f"weights/{cfg.architecture}_{cfg.loss_function}_ep{epoch}.pth")
+            if avg_metrics['psnr'] > best_psnr:
+                best_psnr = avg_metrics['psnr']
+                patience_counter = 0
+                # Save the winner
+                save_path = f"weights/{cfg.save_name}.pth"
+                save_checkpoint(model, epoch, save_path)
+                wandb.save(save_path) # Cloud backup
+                print(f"   🔥 New Best PSNR: {best_psnr:.2f} (Saved)")
+            else:
+                patience_counter += 1
+                print(f"   ⏳ No improvement. Patience: {patience_counter}/{cfg.patience}")
+
+            if patience_counter >= cfg.patience:
+                print(f"🛑 EARLY STOPPING TRIGGERED at Epoch {epoch}")
+                break
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -179,8 +215,10 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--loss_function", type=str, default="mae") # mae, mse, perceptual, nlpd, gan
     parser.add_argument("--subset", type=float, default=1.0) # 0.1 for Proxy Sweep
-    parser.add_argument("--crop_size", type=int, default=128)
     parser.add_argument("--pretrained_weights", type=str, default="")
+    parser.add_argument("--patience", type=int, default=5) 
+    parser.add_argument("--max_norm", type=float, default=1.0) 
+    parser.add_argument("--save_name", type=str, default="model_best") 
     args = parser.parse_args()
     
     train(config=vars(args))
