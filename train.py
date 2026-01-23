@@ -190,15 +190,21 @@ def train(config=None):
             })
             
             # Save
-            if avg_metrics['psnr'] > best_psnr:
+            if avg_metrics['psnr'] > best_psnr or is_gan: # GANs might not improve PSNR, so save periodically!
                 best_psnr = avg_metrics['psnr']
                 patience_counter = 0
-                # Save the winner
-                save_path = f"weights/{cfg.save_name}.pth"
-                save_checkpoint(model, epoch, save_path)
-                wandb.save(save_path) # Cloud backup
-                print(f"   🔥 New Best PSNR: {best_psnr:.2f} (Saved)")
-            else:
+                
+                # Save Generator
+                save_path_G = f"weights/{cfg.save_name}.pth"
+                save_checkpoint(model, epoch, save_path_G)
+                wandb.save(save_path_G) # Cloud backup
+                if is_gan:
+                    save_path_D = f"weights/{cfg.save_name}_D.pth"
+                    torch.save(discriminator.state_dict(), save_path_D)
+                    print(f"   🔥 Saved G and D models to weights/")
+                else:
+                    print(f"   🔥 New Best PSNR: {best_psnr:.2f} (Saved)")
+            else:   
                 patience_counter += 1
                 print(f"   ⏳ No improvement. Patience: {patience_counter}/{cfg.patience}")
 
