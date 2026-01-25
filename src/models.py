@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils import spectral_norm 
 
 # --- COMMON BLOCKS ---
 class SEBlock(nn.Module):
@@ -96,37 +97,35 @@ class ResNetSR(nn.Module):
 class Discriminator(nn.Module):
     def __init__(self, in_nc=3, nf=64):
         super(Discriminator, self).__init__()
+        
+        # Helper to create SN-wrapped blocks
+        def sn_block(in_f, out_f, kernel, stride, padding, bias=True, bn=True):
+            layers = [spectral_norm(nn.Conv2d(in_f, out_f, kernel, stride, padding, bias=bias))]
+            if bn: layers.append(nn.BatchNorm2d(out_f))
+            layers.append(nn.LeakyReLU(0.2, inplace=True))
+            return layers
+
         self.net = nn.Sequential(
-            nn.Conv2d(in_nc, nf, 3, 1, 1, bias=True),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(nf, nf, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(nf),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(nf, nf * 2, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(nf * 2),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(nf * 2, nf * 2, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(nf * 2),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(nf * 2, nf * 4, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(nf * 4),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(nf * 4, nf * 4, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(nf * 4),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(nf * 4, nf * 8, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(nf * 8),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(nf * 8, nf * 8, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(nf * 8),
-            nn.LeakyReLU(0.2, inplace=True),
+            *sn_block(in_nc, nf, 3, 1, 1, bias=True, bn=False),
+            
+            *sn_block(nf, nf, 3, 2, 1, bias=False),      # 64 -> 128
+            *sn_block(nf, nf*2, 3, 1, 1, bias=False),
+            
+            *sn_block(nf*2, nf*2, 3, 2, 1, bias=False),  # 128 -> 256
+            *sn_block(nf*2, nf*4, 3, 1, 1, bias=False),
+            
+            *sn_block(nf*4, nf*4, 3, 2, 1, bias=False),  # 256 -> 512
+            *sn_block(nf*4, nf*8, 3, 1, 1, bias=False),
+            
+            *sn_block(nf*8, nf*8, 3, 2, 1, bias=False),  # 512 -> 1024
         )
+        
         self.classifier = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(nf * 8, 100),
+            spectral_norm(nn.Linear(nf * 8, 100)),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(100, 1)
+            spectral_norm(nn.Linear(100, 1))
         )
 
     def forward(self, x):

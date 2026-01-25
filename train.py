@@ -55,7 +55,7 @@ def train(config=None):
         is_gan = cfg.loss_function == 'gan'
         if is_gan:
             discriminator = Discriminator().to(device)
-            optimizer_D = optim.Adam(discriminator.parameters(), lr=cfg.lr)
+            optimizer_D = optim.Adam(discriminator.parameters(), lr=cfg.lr*0.5)
             criterion_gan_bce = nn.BCEWithLogitsLoss()
             # For GAN, we combine pixel/perceptual + adv
             criterion_content = get_loss_function('mae', device) 
@@ -75,25 +75,32 @@ def train(config=None):
             
             loop = tqdm(train_loader, desc=f"Ep {epoch+1}/{cfg.epochs}")
             
-            for lr_imgs, hr_imgs in loop:
+            for batch_idx,(lr_imgs, hr_imgs) in enumerate(loop):
                 lr_imgs, hr_imgs = lr_imgs.to(device), hr_imgs.to(device)
                 
                 # --- A. GAN TRAINING PATH ---
                 if is_gan:
                     # 1. Train Discriminator
-                    optimizer_D.zero_grad()
-                    fake_imgs = model(lr_imgs).detach()
-                    
-                    real_logits = discriminator(hr_imgs)
-                    fake_logits = discriminator(fake_imgs)
-                    
-                    # Relativistic Logic
-                    d_loss_real = criterion_gan_bce(real_logits - fake_logits.mean(), torch.ones_like(real_logits))
-                    d_loss_fake = criterion_gan_bce(fake_logits - real_logits.mean(), torch.zeros_like(fake_logits))
-                    loss_D = (d_loss_real + d_loss_fake) / 2
-                    
-                    loss_D.backward()
-                    optimizer_D.step()
+                    if batch_idx % 2 == 0:
+                        optimizer_D.zero_grad()
+                        fake_imgs = model(lr_imgs).detach()
+                        
+                        real_logits = discriminator(hr_imgs)
+                        fake_logits = discriminator(fake_imgs)
+                        valid = torch.tensor(0.9, device=device).expand_as(real_logits) # Smooth 1.0 -> 0.9
+                        fake = torch.tensor(0.1, device=device).expand_as(fake_logits)  # Smooth 0.0 -> 0.1
+                        # Relativistic Logic
+                        d_loss_real = criterion_gan_bce(real_logits - fake_logits.mean(), valid)
+                        d_loss_fake = criterion_gan_bce(fake_logits - real_logits.mean(), fake)
+                        loss_D = (d_loss_real + d_loss_fake) / 2
+                        
+                        loss_D.backward()
+                        optimizer_D.step()
+                        wandb.log({
+                            "train_loss_D": loss_D.item(),
+                            "dynamics/D_real": torch.sigmoid(real_logits).mean().item(),
+                            "dynamics/D_fake": torch.sigmoid(fake_logits).mean().item()
+                        })
 
                     # 2. Train Generator
                     optimizer.zero_grad()
@@ -125,9 +132,6 @@ def train(config=None):
                     
                     wandb.log({
                         "train_loss_G": loss.item(), 
-                        "train_loss_D": loss_D.item(),
-                        "dynamics/D_real": torch.sigmoid(real_logits).mean().item(),
-                        "dynamics/D_fake": torch.sigmoid(fake_logits).mean().item(),
                         "dynamics/grad_norm": grad_norm,
                         "dynamics/weight_norm": weight_norm,
                         "dynamics/layer_ratio": layer_ratio
