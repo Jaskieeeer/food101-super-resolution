@@ -7,14 +7,40 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 import wandb
-import os
 
 # Local Imports
 from src.dataset import FoodSRDataset
 from src.models import get_model, Discriminator
-from src.loss import get_loss_function
+from src.loss import get_loss_function, TVLoss 
 from src.metrics import MetricsCalculator
 from src.utils import get_gradient_norm, get_layer_grad_ratio, save_checkpoint, get_weight_norm
+
+# --- HELPER: NOISE INJECTION (For GAN Stability) ---
+def add_noise(img, sigma=0.15):
+    """Adds random Gaussian noise to blindfold the Discriminator"""
+    if sigma <= 0: return img
+    noise = torch.randn_like(img) * sigma
+    return img + noise
+
+# --- HELPER: ICNR SURGERY (The Checkerboard Fix) ---
+def icnr_init(tensor, scale_factor=2):
+    """
+    Modifies a ConvTranspose or PixelShuffle weight tensor to behave 
+    like a Nearest Neighbor resize (smooth) instead of random noise.
+    """
+    out_c, in_c, h, w = tensor.shape
+    if out_c % (scale_factor**2) != 0: return tensor # Skip if shapes mismatch
+    
+    # 1. Create a smaller sub-kernel
+    sub_kernel = torch.zeros(out_c // (scale_factor**2), in_c, h, w)
+    nn.init.kaiming_normal_(sub_kernel)
+    sub_kernel = sub_kernel.transpose(0, 1).contiguous()
+    
+    # 2. "Lock" the sub-pixels by repeating the kernel
+    kernel = sub_kernel.view(in_c, sub_kernel.shape[1], -1)
+    kernel = kernel.repeat(1, scale_factor**2, 1) 
+    
+    return kernel.view(in_c, out_c, h, w).transpose(0, 1)
 
 def train(config=None):
     with wandb.init(config=config) as run:
@@ -24,7 +50,7 @@ def train(config=None):
         device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
         print(f"🚀 Running on {device} | Arch: {cfg.architecture} | Loss: {cfg.loss_function}")
 
-        # --- DATASET (With Proxy/Subset Logic) ---
+        # --- DATASET ---
         full_ds = FoodSRDataset(split='train', crop_size=200, scale_factor=4)
         
         if cfg.subset < 1.0:
@@ -42,32 +68,53 @@ def train(config=None):
         # --- MODEL ---
         model = get_model(cfg.architecture, scale_factor=4, device=device)
         
-        # Optional: Load weights if warming up for GAN
+        # Load Phase 1 weights if provided
         if cfg.pretrained_weights and os.path.exists(cfg.pretrained_weights):
             print(f"🔄 Loading weights from {cfg.pretrained_weights}")
-            model.load_state_dict(torch.load(cfg.pretrained_weights, map_location=device))
+            model.load_state_dict(torch.load(cfg.pretrained_weights, map_location=device), strict=False)
+
+            # ============================================================
+            # 💉 WEIGHT SURGERY (Remove Checkerboard Artifacts)
+            # ============================================================
+            print("💉 Performing ICNR surgery on upsampler to prevent checkerboard...")
+            surgery_count = 0
+            with torch.no_grad():
+                for name, param in model.named_parameters():
+                    # We look for the upsampling convolution weights inside the model
+                    if "upsample" in name and "weight" in name and param.dim() == 4:
+                        # Reset this specific layer to be "locked" (Nearest Neighbor)
+                        # We assume scale_factor=2 for the individual upsample layers
+                        param.data.copy_(icnr_init(param.data, scale_factor=2))
+                        surgery_count += 1
+            print(f"✅ Surgery complete. Fixed {surgery_count} layers. Sub-pixels are now correlated.")
+            # ============================================================
 
         # --- OPTIMIZER ---
-        optimizer = optim.Adam(model.parameters(), lr=cfg.lr)
+        # Initialize optimizer AFTER surgery so it sees the clean weights
+        optimizer = optim.Adam(model.parameters(), lr=cfg.lr, betas=(0.5, 0.999))
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
 
         # --- GAN SETUP ---
         is_gan = cfg.loss_function == 'gan'
         if is_gan:
             discriminator = Discriminator().to(device)
-            optimizer_D = optim.Adam(discriminator.parameters(), lr=cfg.lr*0.5)
+            # Discriminator learns slower (0.5x LR)
+            optimizer_D = optim.Adam(discriminator.parameters(), lr=cfg.lr * 0.5, betas=(0.5, 0.999))
+            
             criterion_gan_bce = nn.BCEWithLogitsLoss()
-            # For GAN, we combine pixel/perceptual + adv
             criterion_content = get_loss_function('mae', device) 
             criterion_percep = get_loss_function('perceptual', device)
+            # TV Loss helps smooth out any remaining noise
+            criterion_tv = TVLoss(tv_loss_weight=1).to(device)
 
-        # --- STANDARD LOSS ---
+        # --- STANDARD SETUP ---
         else:
             criterion = get_loss_function(cfg.loss_function, device)
 
         metrics_calc = MetricsCalculator(device)
         best_psnr = 0.0
         patience_counter = 0
+
         # --- TRAINING LOOP ---
         for epoch in range(cfg.epochs):
             model.train()
@@ -75,20 +122,30 @@ def train(config=None):
             
             loop = tqdm(train_loader, desc=f"Ep {epoch+1}/{cfg.epochs}")
             
-            for batch_idx,(lr_imgs, hr_imgs) in enumerate(loop):
+            # Tracker for D loss (avoids UnboundLocalError)
+            loss_D_item = 0.0
+            
+            for batch_idx, (lr_imgs, hr_imgs) in enumerate(loop):
                 lr_imgs, hr_imgs = lr_imgs.to(device), hr_imgs.to(device)
                 
                 # --- A. GAN TRAINING PATH ---
                 if is_gan:
-                    # 1. Train Discriminator
+                    # 1. Train Discriminator (Only every 2nd step)
                     if batch_idx % 2 == 0:
                         optimizer_D.zero_grad()
                         fake_imgs = model(lr_imgs).detach()
                         
-                        real_logits = discriminator(hr_imgs)
-                        fake_logits = discriminator(fake_imgs)
-                        valid = torch.tensor(0.9, device=device).expand_as(real_logits) # Smooth 1.0 -> 0.9
-                        fake = torch.tensor(0.1, device=device).expand_as(fake_logits)  # Smooth 0.0 -> 0.1
+                        # Add noise to inputs to stabilize D
+                        noisy_hr = add_noise(hr_imgs, sigma=0.05)   # Add 5% noise to real
+                        noisy_fake = add_noise(fake_imgs, sigma=0.05) # Add 5% noise to fake
+                        
+                        real_logits = discriminator(noisy_hr)
+                        fake_logits = discriminator(noisy_fake)
+                        
+                        # Soft Labels (0.9 / 0.1)
+                        valid = torch.tensor(0.9, device=device).expand_as(real_logits)
+                        fake = torch.tensor(0.1, device=device).expand_as(fake_logits)
+                        
                         # Relativistic Logic
                         d_loss_real = criterion_gan_bce(real_logits - fake_logits.mean(), valid)
                         d_loss_fake = criterion_gan_bce(fake_logits - real_logits.mean(), fake)
@@ -96,28 +153,29 @@ def train(config=None):
                         
                         loss_D.backward()
                         optimizer_D.step()
-                        wandb.log({
-                            "train_loss_D": loss_D.item(),
-                            "dynamics/D_real": torch.sigmoid(real_logits).mean().item(),
-                            "dynamics/D_fake": torch.sigmoid(fake_logits).mean().item()
-                        })
+                        
+                        loss_D_item = loss_D.item()
 
-                    # 2. Train Generator
+                    # 2. Train Generator (Every step)
                     optimizer.zero_grad()
-                    fake_imgs = model(lr_imgs) # Re-compute for G gradients
+                    fake_imgs = model(lr_imgs) # Re-compute
                     
-                    # Fool Discriminator
+                    # Fool Discriminator (No noise here! G needs accurate gradients)
                     fake_logits_g = discriminator(fake_imgs)
                     real_logits_g = discriminator(hr_imgs).detach()
-                    loss_adv = criterion_gan_bce(fake_logits_g - real_logits_g.mean(), torch.ones_like(fake_logits_g))
                     
+                    # Generator Losses
+                    loss_adv = criterion_gan_bce(fake_logits_g - real_logits_g.mean(), torch.ones_like(fake_logits_g))
                     loss_pixel = criterion_content(fake_imgs, hr_imgs)
                     loss_perc = criterion_percep(fake_imgs, hr_imgs)
+                    loss_tv = criterion_tv(fake_imgs)
                     
-                    # Weighted Sum (ESRGAN Paper style)
-                    loss = (1e-2 * loss_pixel) + (1.0 * loss_perc) + (5e-3 * loss_adv)
+                    # TOTAL LOSS (Tuned Weights)
+                    # 1e-4 Adv Weight is safer to avoid mesh artifacts
+                    loss = (1e-2 * loss_pixel) + (1.0 * loss_perc) + (1e-5 * loss_adv) + (2e-5 * loss_tv)
                     
                     loss.backward()
+                    
                     if not torch.isfinite(loss):
                         print(f"💥 GENERATOR EXPLODED: {loss.item()}. Stopping run.")
                         wandb.log({"status": "exploded"})
@@ -125,13 +183,19 @@ def train(config=None):
                         return
 
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.max_norm)
+                    
                     grad_norm = get_gradient_norm(model)
                     weight_norm = get_weight_norm(model)  
                     layer_ratio = get_layer_grad_ratio(model)
+                    
                     optimizer.step()
                     
                     wandb.log({
                         "train_loss_G": loss.item(), 
+                        "train_loss_D": loss_D_item,
+                        "train_loss_TV": loss_tv.item(),
+                        "dynamics/D_real": torch.sigmoid(real_logits_g).mean().item(),
+                        "dynamics/D_fake": torch.sigmoid(fake_logits_g).mean().item(),
                         "dynamics/grad_norm": grad_norm,
                         "dynamics/weight_norm": weight_norm,
                         "dynamics/layer_ratio": layer_ratio
@@ -142,17 +206,18 @@ def train(config=None):
                     optimizer.zero_grad()
                     sr_imgs = model(lr_imgs)
                     loss = criterion(sr_imgs, hr_imgs)
+                    
                     if not torch.isfinite(loss):
-                        print(f"💥 LOSS EXPLOSION DETECTED: {loss.item()}. Stopping run to save time.")
-                        wandb.log({"status": "exploded"})
-                        run.finish() # Cleanly end the wandb run
-                        return # Exit the function
+                        print(f"💥 LOSS EXPLOSION: {loss.item()}.")
+                        run.finish()
+                        return
+                        
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.max_norm)
-                    # Dynamics
+                    
                     grad_norm = get_gradient_norm(model)
-                    layer_ratio = get_layer_grad_ratio(model)
                     weight_norm = get_weight_norm(model)
+                    layer_ratio = get_layer_grad_ratio(model)
                     
                     optimizer.step()
                     
@@ -175,10 +240,8 @@ def train(config=None):
                     for k in avg_metrics:
                         avg_metrics[k] += batch_metrics[k]
             
-            # Average over batches
             for k in avg_metrics: avg_metrics[k] /= len(val_loader)
             
-            # Update LR Scheduler
             scheduler.step(avg_metrics['psnr'])
             current_lr = optimizer.param_groups[0]['lr']
             
@@ -193,38 +256,36 @@ def train(config=None):
                 "lr": current_lr
             })
             
-            # Save
-            if avg_metrics['psnr'] > best_psnr or is_gan: # GANs might not improve PSNR, so save periodically!
+            if avg_metrics['psnr'] > best_psnr or is_gan: 
                 best_psnr = avg_metrics['psnr']
                 patience_counter = 0
                 
-                # Save Generator
                 save_path_G = f"weights/{cfg.save_name}.pth"
                 save_checkpoint(model, epoch, save_path_G)
-                wandb.save(save_path_G) # Cloud backup
+                wandb.save(save_path_G)
+                
                 if is_gan:
                     save_path_D = f"weights/{cfg.save_name}_D.pth"
                     torch.save(discriminator.state_dict(), save_path_D)
-                    print(f"   🔥 Saved G and D models to weights/")
+                    print(f"   🔥 Saved G and D models.")
                 else:
                     print(f"   🔥 New Best PSNR: {best_psnr:.2f} (Saved)")
-            else:   
+            else:
                 patience_counter += 1
                 print(f"   ⏳ No improvement. Patience: {patience_counter}/{cfg.patience}")
 
             if patience_counter >= cfg.patience:
-                print(f"🛑 EARLY STOPPING TRIGGERED at Epoch {epoch}")
+                print(f"🛑 EARLY STOPPING at Epoch {epoch}")
                 break
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--architecture", type=str, default="SRCNN")
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=5e-5) 
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--loss_function", type=str, default="mae") # mae, mse, perceptual, nlpd, gan
-    parser.add_argument("--subset", type=float, default=1.0) # 0.1 for Proxy Sweep
+    parser.add_argument("--loss_function", type=str, default="mae") 
+    parser.add_argument("--subset", type=float, default=1.0) 
     parser.add_argument("--pretrained_weights", type=str, default="")
     parser.add_argument("--patience", type=int, default=5) 
     parser.add_argument("--max_norm", type=float, default=1.0) 
