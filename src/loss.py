@@ -2,7 +2,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import vgg19
+class TVLoss(nn.Module):
+    def __init__(self, tv_loss_weight=1):
+        super(TVLoss, self).__init__()
+        self.tv_loss_weight = tv_loss_weight
 
+    def forward(self, x):
+        batch_size = x.size()[0]
+        h_x = x.size()[2]
+        w_x = x.size()[3]
+        count_h = self.tv_loss_weight * (x[:, :, 1:, :] - x[:, :, :h_x - 1, :]).pow(2).sum()
+        count_w = self.tv_loss_weight * (x[:, :, :, 1:] - x[:, :, :, :w_x - 1]).pow(2).sum()
+        return self.tv_loss_weight * 2 * (count_h + count_w) / batch_size
 class PerceptualLoss(nn.Module):
     def __init__(self, device):
         super().__init__()
