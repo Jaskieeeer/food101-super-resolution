@@ -25,6 +25,25 @@ def get_layer_grad_ratio(model):
     first = params[0].grad.data.norm(2).item()
     last = params[-1].grad.data.norm(2).item()
     return first / (last + 1e-8)
+def get_update_ratio(model, lr):
+    """
+    Estimates the ratio of the update size to the weight size.
+    Rule of thumb: Should be around 1e-3. 
+    If < 1e-6: Training is too slow.
+    If > 1e-1: Training is unstable.
+    """
+    param_norms = 0.0
+    update_norms = 0.0
+    
+    for p in model.parameters():
+        if p.grad is not None:
+            # L2 norm of the weight
+            param_norms += p.data.norm(2).item() ** 2
+            # L2 norm of the update (approximate as lr * grad)
+            update_norms += (p.grad.data.norm(2).item() * lr) ** 2
+            
+    if param_norms == 0: return 0.0
+    return (update_norms ** 0.5) / (param_norms ** 0.5)
 
 def save_checkpoint(model, epoch, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)

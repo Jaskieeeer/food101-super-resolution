@@ -6,29 +6,30 @@ from src.loss import NLPDLoss
 class MetricsCalculator:
     def __init__(self, device):
         self.device = device
-        # Standard metrics
+        #  Requirements: Performance metrics (at least 2)
+        # 1. PSNR (Peak Signal-to-Noise Ratio)
         self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(device)
+        # 2. SSIM (Structural Similarity)
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
         
-        # LPIPS (Perceptual)
+        # Extra: LPIPS (Perceptual metric)
         self.lpips = lpips.LPIPS(net='alex', verbose=False).to(device)
         
-        # FIX: Explicitly move NLPDLoss to device
-        self.nlpd = NLPDLoss(device=device).to(device)
+        # Extra: NLPD
+        self.nlpd = NLPDLoss(device=device, channels=3).to(device)
 
     @torch.no_grad()
     def compute(self, sr, hr):
-        # Safety clamp
+        # Clamp inputs to valid image range [0, 1]
         sr = sr.clamp(0, 1)
         hr = hr.clamp(0, 1)
         
         score_psnr = self.psnr(sr, hr)
         score_ssim = self.ssim(sr, hr)
         
-        # LPIPS expects inputs in [-1, 1]
+        # LPIPS expects [-1, 1], so we scale from [0, 1]
         score_lpips = self.lpips((sr * 2) - 1, (hr * 2) - 1).mean()
         
-        # NLPD (now safely on GPU)
         score_nlpd = self.nlpd(sr, hr)
 
         return {
