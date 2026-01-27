@@ -38,3 +38,5 @@ env/
 .idea/
 *.swp
 .DS_Store
+/data
+/weights
