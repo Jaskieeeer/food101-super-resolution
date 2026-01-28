@@ -207,7 +207,6 @@ if __name__ == "__main__":
     parser.add_argument("--pretrained_weights", type=str, default="")
     parser.add_argument("--patience", type=int, default=5) 
     parser.add_argument("--save_name", type=str, default="model_best") 
-    parser.add_argument("--augment", action='store_true', help="Use data augmentation")
     args = parser.parse_args()
     
     train(config=vars(args))
