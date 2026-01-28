@@ -1,4 +1,5 @@
 [core]
-    remote = myremote
-['remote "myremote"']
-    url = gdrive://1TLHlIsbZ3q4039-928ylyCNA2RInyBvW
+    remote = origin
+['remote "origin"']
+    url = s3://dvc
+    endpointurl = https://dagshub.com/Jaskieeeer/food101-super-resolution.s3

@@ -21,6 +21,8 @@ def icnr_init(layer, scale_factor=2):
     
     if layer.bias is not None:
         nn.init.zeros_(layer.bias)
+
+
 class SEBlock(nn.Module):
     def __init__(self, channel, reduction=16):
         super(SEBlock, self).__init__()
@@ -218,7 +220,7 @@ def get_model(name, scale_factor=4, device='cpu'):
     if name == "SRCNN":
         return SRCNN(scale_factor=scale_factor, hidden_dim=64).to(device)
     elif name == "RESNET":
-        return ResNetSR(scale_factor=scale_factor, num_residuals=32, num_channels=96).to(device)
+        return ResNetSR(scale_factor=scale_factor, num_residuals=16, num_channels=64).to(device)
     elif name == "AttentionSR":
         return AttentionSR(scale_factor=scale_factor, num_residuals=32, num_channels=96).to(device)
     else:

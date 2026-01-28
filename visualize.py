@@ -5,12 +5,14 @@ import numpy as np
 import random
 import math
 import os
+import time
+from collections import defaultdict
 
 from src.models import get_model
 
 SCALE_FACTOR = 4
-NUM_EXAMPLES = 17
-OUTPUT_DIR = "report"
+NUM_EXAMPLES = 1000
+OUTPUT_DIR = "report/images"
 
 WEIGHTS = {
     "SRCNN":           "weights/srcnn_nlpd_best.pth",
@@ -35,18 +37,28 @@ def get_prediction(model_name, weight_path, lr_tensor, device):
         model.load_state_dict(torch.load(weight_path, map_location=device))
     except FileNotFoundError:
         print(f"Warning: Could not find weights for {model_name} at {weight_path}")
-        return None
+        return None, None
     except Exception as e:
         print(f"Error loading {model_name}: {e}")
-        return None
+        return None, None
 
     model.eval()
+    
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    
+    start_time = time.perf_counter()
     
     with torch.no_grad():
         sr_tensor = model(lr_tensor)
     
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    
+    inference_time = time.perf_counter() - start_time
+    
     sr_img = transforms.ToPILImage()(torch.clamp(sr_tensor.squeeze(0).cpu(), 0, 1))
-    return sr_img
+    return sr_img, inference_time
 
 def run_comparison():
     device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
@@ -57,6 +69,8 @@ def run_comparison():
     indices = random.sample(range(len(test_dataset)), NUM_EXAMPLES)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    inference_times = defaultdict(list)
 
     for i, idx in enumerate(indices):
         print(f"\n--- Processing Image {i+1}/{NUM_EXAMPLES} (Index: {idx}) ---")
@@ -85,16 +99,27 @@ def run_comparison():
         print(f"Saved Baseline | Bicubic PSNR: {psnr_bicubic:.2f} dB")
 
         for name, path in WEIGHTS.items():
-            sr_img = get_prediction(name, path, lr_tensor, device)
+            sr_img, inf_time = get_prediction(name, path, lr_tensor, device)
             
             if sr_img:
                 psnr = calculate_psnr(sr_img, hr_img)
+                inference_times[name].append(inf_time)
                 
                 filename = f"{name.lower()}.png"
                 sr_img.save(os.path.join(save_path, filename))
-                print(f"Saved {name} | PSNR: {psnr:.2f} dB")
+                print(f"Saved {name} | PSNR: {psnr:.2f} dB | Inference: {inf_time*1000:.2f} ms")
             else:
                 print(f"Skipped {name} (Model failed to load)")
+
+    print(f"\n{'='*50}")
+    print("INFERENCE TIME SUMMARY")
+    print(f"{'='*50}")
+    for name, times in inference_times.items():
+        avg_time = np.mean(times) * 1000
+        std_time = np.std(times) * 1000
+        min_time = np.min(times) * 1000
+        max_time = np.max(times) * 1000
+        print(f"{name:15} | Avg: {avg_time:7.2f} ms | Std: {std_time:6.2f} ms | Min: {min_time:7.2f} ms | Max: {max_time:7.2f} ms")
 
     print(f"\nDone! Check the '{OUTPUT_DIR}' folder.")
 
